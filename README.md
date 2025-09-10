@@ -2,15 +2,17 @@
 
 ## Overview
 
-This application is designed to reliably reproduce a specific race condition crash in RenPy's video subsystem. The target crash occurs in `media_read_video` at offset `+0x86`.
+This application is designed to reliably (eventually) reproduce a specific race condition crash in RenPy's video subsystem. The target crash occurs in `media_read_video` at offsets `+0xd` and `+0x86`.
 
 ### Technical Target
 
-The application triggers a race condition where:
-- `SDL_UnlockMutex(ms->lock)` releases protection in `media_read_video`
-- Decoder thread deallocates surface queue entry containing `sqe->pixels`
-- Main thread accesses null pointer (`rdi=0000000000000000`) in `SDL_CreateRGBSurfaceFrom`
-- Crash occurs at instruction: `movsd xmm0,mmword ptr [rdi+10h]`
+The application triggers race conditions in RenPy's video subsystem where:
+- `media_close()` sets quit flag while `media_read_video()` is executing
+- Decoder thread calls `deallocate()` and frees MediaState or surface data
+- Main thread accesses freed memory, causing null pointer dereferences
+- Crashes occur at two locations:
+  - **+0xd**: `cmp dword ptr [rcx+50h],0FFFFFFFFh` (MediaState freed)
+  - **+0x86**: `movsd xmm0,mmword ptr [rdi+10h]` (surface data freed)
 
 ## System Requirements
 
@@ -48,42 +50,57 @@ renpy.exe /path/to/RaceConditionRepro
 
 ### Expected Crash Signature
 
-When the race condition occurs, you should see (in WinDbg):
+When the race condition occurs, you may see one of two crash patterns in WinDbg:
 
+**Crash Type 1: MediaState Use-After-Free**
+1. **Crash Location**: `librenpython!media_read_video+0xd`
+2. **Instruction**: `cmp dword ptr [rcx+50h],0FFFFFFFFh`
+3. **Register State**: `rcx=0000000000000000` (null MediaState pointer)
+4. **Cause**: MediaState freed while function executing
+
+**Crash Type 2: Surface Queue Use-After-Free**
 1. **Crash Location**: `librenpython!media_read_video+0x86`
 2. **Instruction**: `movsd xmm0,mmword ptr [rdi+10h]`
-3. **Register State**: `rdi=0000000000000000` (null pointer)
+3. **Register State**: `rdi=0000000000000000` (null surface data pointer)
 4. **Call Stack**: Shows path through `RPS_read_video` and `renpy_audio_renpysound` to `media_read_video`
+
+**Both crashes indicate the same underlying race condition** but manifest at different points in the function depending on timing. Type 1 occurs earlier (function entry) while Type 2 occurs later (surface creation).
 
 ## Technical Details
 
 ### Race Condition Mechanics
 
-The crash occurs due to a timing window in the video decoder:
+Two distinct race conditions have been identified:
 
-1. Main thread calls `media_read_video`
-2. Function acquires mutex lock on surface queue
-3. Surface queue entry is prepared with pixel data
-4. `SDL_UnlockMutex(ms->lock)` releases protection
-5. **RACE WINDOW**: Decoder thread can now modify surface queue
-6. Decoder thread deallocates the surface queue entry
-7. Main thread attempts to access `sqe->pixels` (now null)
-8. `SDL_CreateRGBSurfaceFrom` dereferences null pointer
-9. Crash at `movsd xmm0,mmword ptr [rdi+10h]` instruction
+**Race 1: MediaState Use-After-Free (+0xd)**
+1. Thread A calls `media_read_video(ms)`
+2. Thread B calls `media_close(ms)` → sets `ms->quit = 1`
+3. Decoder thread exits, calls `deallocate(ms)` → frees MediaState
+4. Thread A accesses `ms->video_stream` → crash at +0xd
+
+**Race 2: Surface Queue Use-After-Free (+0x86)**
+1. Main thread dequeues surface entry, releases mutex
+2. `media_close()` triggers decoder thread shutdown
+3. `deallocate()` frees `sqe->pixels`
+4. Main thread accesses freed `sqe->pixels` → crash at +0x86
 
 ## Results and Validation
 
 ### Success Criteria
 
-A successful reproduction must demonstrate:
+A successful reproduction demonstrates either:
 
-1. **Exact crash location**: `media_read_video+0x86`
-2. **Correct instruction**: `movsd xmm0,mmword ptr [rdi+10h]`
-3. **Null pointer state**: `rdi=0000000000000000`
-4. **Threading context**: Race between main and decoder threads
-5. **Call stack match**: Path through audio subsystem initialization
+**Crash Type 1 (+0xd)**:
+- Location: `media_read_video+0xd`
+- Instruction: `cmp dword ptr [rcx+50h],0FFFFFFFFh`
+- Register: `rcx=0000000000000000`
+
+**Crash Type 2 (+0x86)**:
+- Location: `media_read_video+0x86`  
+- Instruction: `movsd xmm0,mmword ptr [rdi+10h]`
+- Register: `rdi=0000000000000000`
 
 ### Expected Timeline
 
 - **Setup time**: 5-10 minutes
-- **Crash occurrence**: Typically within 3-20 minutes of testing
+- **Crash occurrence**: Typically within 3 minutes to an hour of testing
