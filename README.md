@@ -2,7 +2,7 @@
 
 ## Overview
 
-This application is designed to reliably reproduce a specific race condition crash in RenPy's video subsystem. The target crash occurs in `media_read_video` at offset `+0x86` with the failure hash `{1155885f-6360-d658-be01-ec1f620514b2}`.
+This application is designed to reliably reproduce a specific race condition crash in RenPy's video subsystem. The target crash occurs in `media_read_video` at offset `+0x86`.
 
 ### Technical Target
 
